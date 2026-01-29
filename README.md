@@ -1,14 +1,16 @@
 # Agent Control Panel (ACP)
 
-Agent Control Panel (ACP) is a local-first, mobile-first control panel for browser automation jobs driven by CSV rows. It uses a Vite + React frontend with localStorage persistence and a companion Tampermonkey userscript for browser-side automation.
+Agent Control Panel (ACP) is a local-first, mobile-first control panel for browser automation jobs driven by CSV rows. It uses a Vite + React frontend with IndexedDB persistence for jobs/workflows/runs/logs, localStorage only for lightweight settings, and a companion Tampermonkey userscript for browser-side automation.
 
 ## Features
 - Upload CSVs, create jobs, and manage workflows locally.
 - Step-based workflows with retries, per-step timeouts, and best-effort mode.
 - Resume from the last completed row.
 - CSV import/export with post option selection to avoid duplicates.
+- IndexedDB storage for jobs, workflows, runs, logs, and row results.
+- Export/Import all ACP data as JSON, plus per-run report export as CSV + JSON.
 - Global kill switch for emergency stop across active runs.
-- Interop with BroadcastChannel, window.postMessage, and localStorage fallbacks.
+- Interop with BroadcastChannel, window.postMessage, and localStorage fallbacks plus heartbeat/handshake.
 - Debug logging toggle for verbose automation logs.
 
 ## Project Structure

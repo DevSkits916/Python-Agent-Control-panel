@@ -15,6 +15,7 @@ export type RunStatus = "idle" | "running" | "paused" | "stopped" | "error" | "c
 
 export type RunLog = {
   id: string;
+  runId: string;
   rowIndex: number;
   stepIndex: number;
   level: "debug" | "info" | "warn" | "error";
@@ -23,12 +24,15 @@ export type RunLog = {
 };
 
 export type RowResult = {
+  runId: string;
   rowIndex: number;
   status: "success" | "failed" | "skipped";
   error: string | null;
+  durationMs?: number;
   artifacts?: {
     screenshot?: string;
     htmlSnapshot?: string;
+    consoleLogs?: string[];
   };
 };
 
@@ -37,6 +41,7 @@ export type Run = {
   jobId: string;
   status: RunStatus;
   currentRowIndex: number;
+  currentStepIndex: number;
   lastCompletedRow: number;
   successCount: number;
   failureCount: number;
@@ -54,8 +59,6 @@ export type ACPState = {
   debugEnabled: boolean;
   killSwitchEnabled: boolean;
 };
-
-const STORAGE_KEY = "acp:state";
 
 export const createDefaultWorkflow = (): WorkflowDefinition => ({
   id: uuidv4(),
@@ -94,42 +97,9 @@ export const createDefaultSettings = (): RunSettings => ({
   delayMaxMs: 900,
   concurrency: 1,
   bestEffort: false,
+  dryRun: false,
+  stepThrough: false,
 });
-
-export const loadState = (): ACPState => {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) {
-    return {
-      workflows: [createDefaultWorkflow()],
-      jobs: [],
-      runs: [],
-      debugEnabled: false,
-      killSwitchEnabled: false,
-    };
-  }
-  try {
-    const parsed = JSON.parse(raw) as ACPState;
-    return {
-      workflows: parsed.workflows ?? [createDefaultWorkflow()],
-      jobs: parsed.jobs ?? [],
-      runs: parsed.runs ?? [],
-      debugEnabled: parsed.debugEnabled ?? false,
-      killSwitchEnabled: parsed.killSwitchEnabled ?? false,
-    };
-  } catch {
-    return {
-      workflows: [createDefaultWorkflow()],
-      jobs: [],
-      runs: [],
-      debugEnabled: false,
-      killSwitchEnabled: false,
-    };
-  }
-};
-
-export const saveState = (state: ACPState) => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-};
 
 export const createWorkflow = (name = "New Workflow"): WorkflowDefinition => ({
   id: uuidv4(),
@@ -164,6 +134,7 @@ export const createRun = (jobId: string, settings: RunSettings): Run => ({
   jobId,
   status: "idle",
   currentRowIndex: 0,
+  currentStepIndex: 0,
   lastCompletedRow: -1,
   successCount: 0,
   failureCount: 0,

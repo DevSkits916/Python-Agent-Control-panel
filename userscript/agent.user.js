@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Agent Control Panel Runner
 // @namespace    https://local.acp
-// @version      1.0.0
+// @version      1.1.0
 // @description  Executes ACP workflows on Facebook-style pages with resilient selectors.
 // @author       ACP
 // @match        *://*.facebook.com/*
@@ -15,6 +15,28 @@
   const STORAGE_KEY = "acp:message";
   const DEBUG_KEY = "acp:debug";
   const MAX_BACKOFF_MS = 8000;
+  const PROTOCOL_VERSION = "1.1.0";
+  const AGENT_VERSION = "1.1.0";
+  const STARTED_AT = Date.now();
+
+  const createRequestId = () =>
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const consoleBuffer = [];
+  const captureConsole = (level, args) => {
+    const entry = `[${new Date().toISOString()}] ${level}: ${args.map(String).join(" ")}`;
+    consoleBuffer.push(entry);
+    if (consoleBuffer.length > 50) {
+      consoleBuffer.shift();
+    }
+  };
+  ["log", "warn", "error"].forEach((method) => {
+    const original = console[method].bind(console);
+    console[method] = (...args) => {
+      captureConsole(method, args);
+      original(...args);
+    };
+  });
 
   const log = (level, message, context = {}) => {
     const debugEnabled = JSON.parse(localStorage.getItem(DEBUG_KEY) ?? "false");
@@ -32,6 +54,7 @@
     paused: false,
     stopped: false,
     killSwitchEnabled: false,
+    stepSignal: null,
   };
 
   const listeners = new Set();
@@ -239,6 +262,18 @@
     });
   };
 
+  const sendAck = (requestId, commandType, ok, error = "") => {
+    broadcast({
+      type: "AGENT_ACK",
+      payload: {
+        requestId,
+        commandType,
+        ok,
+        error,
+      },
+    });
+  };
+
   const sendLog = (runId, rowIndex, stepIndex, level, message) => {
     broadcast({
       type: "AGENT_LOG",
@@ -262,6 +297,7 @@
         status,
         error,
         artifacts,
+        durationMs: artifacts?.durationMs ?? undefined,
       },
     });
   };
@@ -311,7 +347,11 @@
       const row = rows[rowIndex];
       let rowFailed = false;
       let rowErrorMessage = "";
+      const rowStartedAt = Date.now();
       for (let stepIndex = 0; stepIndex < workflow.steps.length; stepIndex += 1) {
+        if (settings.stepThrough) {
+          await waitForStepSignal(runId, rowIndex, stepIndex);
+        }
         const step = workflow.steps[stepIndex];
         const retries = step.retries ?? 0;
         const timeoutMs = step.timeoutMs ?? settings.timeoutMs;
@@ -340,6 +380,8 @@
         const artifacts = {
           screenshot: captureScreenshot(),
           htmlSnapshot: captureHtmlSnapshot(),
+          consoleLogs: consoleBuffer.slice(-50),
+          durationMs: Date.now() - rowStartedAt,
         };
         sendRowResult(runId, rowIndex, "failed", rowErrorMessage || "Row failed during execution", artifacts);
         if (!settings.bestEffort) {
@@ -351,16 +393,28 @@
         sendRowResult(runId, rowIndex, "success", null, {
           screenshot: captureScreenshot(),
           htmlSnapshot: captureHtmlSnapshot(),
+          consoleLogs: consoleBuffer.slice(-50),
+          durationMs: Date.now() - rowStartedAt,
         });
       }
     }
 
+    storageState.status = "complete";
+    storageState.runId = null;
     sendStatus(runId, "complete", state, "Run complete");
   };
 
   const executeStep = async (step, row, vars, settings) => {
     const resolvedSelector = step.selector ? resolveTemplate(step.selector, row, vars) : null;
     const resolvedValue = step.value ? resolveTemplate(step.value, row, vars) : null;
+    if (settings.dryRun) {
+      log("info", "Dry run: skipping step execution", {
+        stepType: step.type,
+        resolvedSelector,
+        resolvedValue,
+      });
+      return;
+    }
     switch (step.type) {
       case "goto":
         if (!resolvedValue) {
@@ -426,34 +480,109 @@
     }
   };
 
-  listeners.add((message) => {
-    if (message.type === "CONTROL_START_RUN") {
-      if (storageState.killSwitchEnabled) {
-        sendStatus(message.payload.runId, "stopped", storageState, "Kill switch enabled");
-        sendLog(message.payload.runId, 0, 0, "error", "Run blocked by kill switch");
-        return;
-      }
-      runWorkflow(message.payload).catch((error) => {
-        log("error", "Run failed", error);
-        sendStatus(message.payload.runId, "error", storageState, "Run error");
-      });
-    }
-    if (message.type === "CONTROL_PAUSE_RUN") {
-      storageState.paused = true;
-    }
-    if (message.type === "CONTROL_RESUME_RUN") {
-      storageState.paused = false;
-    }
-    if (message.type === "CONTROL_STOP_RUN") {
-      storageState.stopped = true;
-    }
-    if (message.type === "CONTROL_KILL_SWITCH") {
-      storageState.killSwitchEnabled = Boolean(message.payload.enabled);
-      if (storageState.killSwitchEnabled) {
-        storageState.stopped = true;
+  const waitForStepSignal = (runId, rowIndex, stepIndex) =>
+    new Promise((resolve) => {
+      const interval = setInterval(() => {
+        if (
+          storageState.stepSignal &&
+          storageState.stepSignal.runId === runId &&
+          storageState.stepSignal.rowIndex === rowIndex &&
+          storageState.stepSignal.stepIndex === stepIndex
+        ) {
+          storageState.stepSignal = null;
+          clearInterval(interval);
+          resolve();
+        }
+      }, 200);
+    });
+
+  const handleMessage = (message) => {
+    switch (message.type) {
+      case "CONTROL_HELLO":
+        sendAck(message.payload.requestId, message.type, true);
+        broadcast({
+          type: "AGENT_HELLO",
+          payload: {
+            requestId: message.payload.requestId,
+            agentVersion: AGENT_VERSION,
+            protocolVersion: PROTOCOL_VERSION,
+            tabUrl: window.location.href,
+            site: window.location.hostname,
+          },
+        });
+        break;
+      case "CONTROL_PING":
+        broadcast({
+          type: "AGENT_PONG",
+          payload: {
+            requestId: message.payload.requestId,
+            tabUrl: window.location.href,
+            site: window.location.hostname,
+            uptimeMs: Date.now() - STARTED_AT,
+          },
+        });
+        break;
+      case "CONTROL_START_RUN":
+        if (storageState.killSwitchEnabled) {
+          sendStatus(message.payload.runId, "stopped", storageState, "Kill switch enabled");
+          sendLog(message.payload.runId, 0, 0, "error", "Run blocked by kill switch");
+          sendAck(message.payload.requestId, message.type, false, "Kill switch enabled");
+          return;
+        }
+        if (storageState.status === "running") {
+          sendAck(message.payload.requestId, message.type, false, "Run already in progress");
+          return;
+        }
+        sendAck(message.payload.requestId, message.type, true);
+        runWorkflow(message.payload).catch((error) => {
+          log("error", "Run failed", error);
+          sendStatus(message.payload.runId, "error", storageState, "Run error");
+        });
+        break;
+      case "CONTROL_PAUSE_RUN":
+        storageState.paused = true;
+        sendAck(message.payload.requestId, message.type, true);
+        break;
+      case "CONTROL_RESUME_RUN":
         storageState.paused = false;
-      }
+        sendAck(message.payload.requestId, message.type, true);
+        break;
+      case "CONTROL_STOP_RUN":
+        storageState.stopped = true;
+        sendAck(message.payload.requestId, message.type, true);
+        break;
+      case "CONTROL_KILL_SWITCH":
+        storageState.killSwitchEnabled = Boolean(message.payload.enabled);
+        if (storageState.killSwitchEnabled) {
+          storageState.stopped = true;
+          storageState.paused = false;
+        }
+        sendAck(message.payload.requestId, message.type, true);
+        break;
+      case "CONTROL_STEP_NEXT":
+        storageState.stepSignal = {
+          runId: message.payload.runId,
+          rowIndex: message.payload.rowIndex,
+          stepIndex: message.payload.stepIndex,
+        };
+        sendAck(message.payload.requestId, message.type, true);
+        break;
+      default:
+        break;
     }
+  };
+
+  listeners.add((message) => handleMessage(message));
+
+  broadcast({
+    type: "AGENT_HELLO",
+    payload: {
+      requestId: createRequestId(),
+      agentVersion: AGENT_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
+      tabUrl: window.location.href,
+      site: window.location.hostname,
+    },
   });
 
   log("info", "ACP userscript initialized");
