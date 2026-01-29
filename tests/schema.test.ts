@@ -10,6 +10,14 @@ describe("schema validation", () => {
     expect(validateMessage(message)).toBe(true);
   });
 
+  it("accepts kill switch messages", () => {
+    const message = {
+      type: "CONTROL_KILL_SWITCH",
+      payload: { enabled: true },
+    };
+    expect(validateMessage(message)).toBe(true);
+  });
+
   it("rejects invalid messages", () => {
     const message = {
       type: "CONTROL_PAUSE_RUN",

@@ -29,6 +29,11 @@ export type ControlStopRunMessage = {
   payload: { runId: string };
 };
 
+export type ControlKillSwitchMessage = {
+  type: "CONTROL_KILL_SWITCH";
+  payload: { enabled: boolean };
+};
+
 export type AgentStatusMessage = {
   type: "AGENT_STATUS";
   payload: {
@@ -72,6 +77,7 @@ export type ACPMessage =
   | ControlPauseRunMessage
   | ControlResumeRunMessage
   | ControlStopRunMessage
+  | ControlKillSwitchMessage
   | AgentStatusMessage
   | AgentLogMessage
   | AgentRowResultMessage;

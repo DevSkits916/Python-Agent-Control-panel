@@ -7,6 +7,7 @@ Agent Control Panel (ACP) is a local-first, mobile-first control panel for brows
 - Step-based workflows with retries, per-step timeouts, and best-effort mode.
 - Resume from the last completed row.
 - CSV import/export with post option selection to avoid duplicates.
+- Global kill switch for emergency stop across active runs.
 - Interop with BroadcastChannel, window.postMessage, and localStorage fallbacks.
 - Debug logging toggle for verbose automation logs.
 
@@ -40,6 +41,8 @@ The static site outputs to `dist/`.
 2. Create a new userscript and paste `userscript/agent.user.js`.
 3. Open Facebook or the target site.
 4. In ACP, create a workflow and start a run. The userscript listens for control messages and executes steps.
+
+⚠️ You are responsible for complying with the target site’s Terms of Service and automation policies. Use rate limits and monitor runs carefully.
 
 ## CSV Format
 Required:
