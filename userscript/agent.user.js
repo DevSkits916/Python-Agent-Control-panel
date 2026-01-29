@@ -31,6 +31,7 @@
     currentRowIndex: -1,
     paused: false,
     stopped: false,
+    killSwitchEnabled: false,
   };
 
   const listeners = new Set();
@@ -267,6 +268,11 @@
 
   const runWorkflow = async (payload) => {
     const { runId, workflow, rows, settings, resumeFrom } = payload;
+    if (storageState.killSwitchEnabled) {
+      sendStatus(runId, "stopped", storageState, "Kill switch enabled");
+      sendLog(runId, 0, 0, "error", "Run blocked by kill switch");
+      return;
+    }
     storageState.status = "running";
     storageState.runId = runId;
     storageState.currentRowIndex = resumeFrom;
@@ -284,6 +290,9 @@
     const vars = {};
 
     for (let rowIndex = resumeFrom; rowIndex < rows.length; rowIndex += 1) {
+      if (storageState.killSwitchEnabled) {
+        storageState.stopped = true;
+      }
       if (storageState.stopped) {
         sendStatus(runId, "stopped", state, "Run stopped");
         return;
@@ -291,6 +300,11 @@
       while (storageState.paused) {
         sendStatus(runId, "paused", state, "Run paused");
         await delay(500);
+      }
+      if (storageState.killSwitchEnabled) {
+        storageState.stopped = true;
+        sendStatus(runId, "stopped", state, "Kill switch enabled");
+        return;
       }
       state.currentRowIndex = rowIndex;
       sendStatus(runId, "running", state, "Processing row");
@@ -414,6 +428,11 @@
 
   listeners.add((message) => {
     if (message.type === "CONTROL_START_RUN") {
+      if (storageState.killSwitchEnabled) {
+        sendStatus(message.payload.runId, "stopped", storageState, "Kill switch enabled");
+        sendLog(message.payload.runId, 0, 0, "error", "Run blocked by kill switch");
+        return;
+      }
       runWorkflow(message.payload).catch((error) => {
         log("error", "Run failed", error);
         sendStatus(message.payload.runId, "error", storageState, "Run error");
@@ -427,6 +446,13 @@
     }
     if (message.type === "CONTROL_STOP_RUN") {
       storageState.stopped = true;
+    }
+    if (message.type === "CONTROL_KILL_SWITCH") {
+      storageState.killSwitchEnabled = Boolean(message.payload.enabled);
+      if (storageState.killSwitchEnabled) {
+        storageState.stopped = true;
+        storageState.paused = false;
+      }
     }
   });
 

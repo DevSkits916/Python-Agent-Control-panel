@@ -19,6 +19,9 @@
     "CONTROL_STOP_RUN": {
       "runId": "string"
     },
+    "CONTROL_KILL_SWITCH": {
+      "enabled": "boolean"
+    },
     "AGENT_STATUS": {
       "runId": "string",
       "status": "string",

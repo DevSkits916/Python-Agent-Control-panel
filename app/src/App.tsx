@@ -83,6 +83,10 @@ const App: React.FC = () => {
   }, [state]);
 
   useEffect(() => {
+    transport.send({ type: "CONTROL_KILL_SWITCH", payload: { enabled: state.killSwitchEnabled } });
+  }, [state.killSwitchEnabled]);
+
+  useEffect(() => {
     const unsubscribe = transport.subscribe((message) => {
       setState((prev) => handleMessage(prev, message));
     });
@@ -153,6 +157,10 @@ const App: React.FC = () => {
   };
 
   const handleStartRun = (job: Job) => {
+    if (state.killSwitchEnabled) {
+      alert("Kill switch is enabled. Disable it in Settings to start a run.");
+      return;
+    }
     const settings = createDefaultSettings();
     const run = createRun(job.id, settings);
     const workflow = workflows.find((flow) => flow.id === job.workflowId);
@@ -236,6 +244,14 @@ const App: React.FC = () => {
     });
   };
 
+  const handleKillSwitchToggle = () => {
+    setState((prev) => {
+      const next = !prev.killSwitchEnabled;
+      transport.send({ type: "CONTROL_KILL_SWITCH", payload: { enabled: next } });
+      return { ...prev, killSwitchEnabled: next };
+    });
+  };
+
   return (
     <div className="app">
       <header className="app__header">
@@ -286,6 +302,12 @@ const App: React.FC = () => {
       </nav>
 
       <main className="app__content">
+        <section className="panel panel--warning">
+          <p>
+            ⚠️ You are responsible for complying with the target site’s Terms of Service and
+            automation policies. Use rate limits, avoid aggressive automation, and monitor runs.
+          </p>
+        </section>
         {activeTab === "dashboard" && (
           <section className="panel">
             <h2>Jobs</h2>
@@ -394,6 +416,18 @@ const App: React.FC = () => {
               </label>
               <p className="muted">
                 Debug logs are shared with the automation userscript through localStorage.
+              </p>
+              <label className="toggle toggle--danger">
+                <input
+                  type="checkbox"
+                  checked={state.killSwitchEnabled}
+                  onChange={handleKillSwitchToggle}
+                />
+                Emergency kill switch (stops all runs)
+              </label>
+              <p className="muted">
+                When enabled, the userscript will stop active runs and ignore new run commands until
+                you disable it.
               </p>
             </div>
           </section>

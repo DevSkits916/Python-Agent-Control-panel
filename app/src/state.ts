@@ -52,6 +52,7 @@ export type ACPState = {
   jobs: Job[];
   runs: Run[];
   debugEnabled: boolean;
+  killSwitchEnabled: boolean;
 };
 
 const STORAGE_KEY = "acp:state";
@@ -103,6 +104,7 @@ export const loadState = (): ACPState => {
       jobs: [],
       runs: [],
       debugEnabled: false,
+      killSwitchEnabled: false,
     };
   }
   try {
@@ -112,6 +114,7 @@ export const loadState = (): ACPState => {
       jobs: parsed.jobs ?? [],
       runs: parsed.runs ?? [],
       debugEnabled: parsed.debugEnabled ?? false,
+      killSwitchEnabled: parsed.killSwitchEnabled ?? false,
     };
   } catch {
     return {
@@ -119,6 +122,7 @@ export const loadState = (): ACPState => {
       jobs: [],
       runs: [],
       debugEnabled: false,
+      killSwitchEnabled: false,
     };
   }
 };
