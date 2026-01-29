@@ -1,0 +1,46 @@
+{
+  "version": "1.0.0",
+  "channel": "acp-control",
+  "types": {
+    "CONTROL_START_RUN": {
+      "runId": "string",
+      "jobId": "string",
+      "workflow": "object",
+      "rows": "array",
+      "settings": "object",
+      "resumeFrom": "number"
+    },
+    "CONTROL_PAUSE_RUN": {
+      "runId": "string"
+    },
+    "CONTROL_RESUME_RUN": {
+      "runId": "string"
+    },
+    "CONTROL_STOP_RUN": {
+      "runId": "string"
+    },
+    "AGENT_STATUS": {
+      "runId": "string",
+      "status": "string",
+      "currentRowIndex": "number",
+      "message": "string",
+      "successCount": "number",
+      "failureCount": "number"
+    },
+    "AGENT_LOG": {
+      "runId": "string",
+      "rowIndex": "number",
+      "stepIndex": "number",
+      "level": "string",
+      "message": "string",
+      "timestamp": "string"
+    },
+    "AGENT_ROW_RESULT": {
+      "runId": "string",
+      "rowIndex": "number",
+      "status": "string",
+      "error": "string",
+      "artifacts": "object"
+    }
+  }
+}

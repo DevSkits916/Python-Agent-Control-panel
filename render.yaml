@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: agent-control-panel
+    env: static
+    staticPublishPath: dist
+    buildCommand: npm install && npm run build
