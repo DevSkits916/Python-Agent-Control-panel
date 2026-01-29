@@ -1,8 +1,42 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "channel": "acp-control",
   "types": {
+    "CONTROL_HELLO": {
+      "requestId": "string",
+      "appVersion": "string",
+      "protocolVersion": "string"
+    },
+    "AGENT_HELLO": {
+      "requestId": "string",
+      "agentVersion": "string",
+      "protocolVersion": "string",
+      "tabUrl": "string",
+      "site": "string"
+    },
+    "CONTROL_PING": {
+      "requestId": "string"
+    },
+    "CONTROL_STEP_NEXT": {
+      "requestId": "string",
+      "runId": "string",
+      "rowIndex": "number",
+      "stepIndex": "number"
+    },
+    "AGENT_PONG": {
+      "requestId": "string",
+      "tabUrl": "string",
+      "site": "string",
+      "uptimeMs": "number"
+    },
+    "AGENT_ACK": {
+      "requestId": "string",
+      "commandType": "string",
+      "ok": "boolean",
+      "error": "string"
+    },
     "CONTROL_START_RUN": {
+      "requestId": "string",
       "runId": "string",
       "jobId": "string",
       "workflow": "object",
@@ -11,15 +45,19 @@
       "resumeFrom": "number"
     },
     "CONTROL_PAUSE_RUN": {
+      "requestId": "string",
       "runId": "string"
     },
     "CONTROL_RESUME_RUN": {
+      "requestId": "string",
       "runId": "string"
     },
     "CONTROL_STOP_RUN": {
+      "requestId": "string",
       "runId": "string"
     },
     "CONTROL_KILL_SWITCH": {
+      "requestId": "string",
       "enabled": "boolean"
     },
     "AGENT_STATUS": {
@@ -43,7 +81,8 @@
       "rowIndex": "number",
       "status": "string",
       "error": "string",
-      "artifacts": "object"
+      "artifacts": "object",
+      "durationMs": "number"
     }
   }
 }

@@ -5,6 +5,7 @@ export type MessageType = keyof typeof schema.types;
 export type ControlStartRunMessage = {
   type: "CONTROL_START_RUN";
   payload: {
+    requestId: string;
     runId: string;
     jobId: string;
     workflow: WorkflowDefinition;
@@ -16,22 +17,79 @@ export type ControlStartRunMessage = {
 
 export type ControlPauseRunMessage = {
   type: "CONTROL_PAUSE_RUN";
-  payload: { runId: string };
+  payload: { requestId: string; runId: string };
 };
 
 export type ControlResumeRunMessage = {
   type: "CONTROL_RESUME_RUN";
-  payload: { runId: string };
+  payload: { requestId: string; runId: string };
 };
 
 export type ControlStopRunMessage = {
   type: "CONTROL_STOP_RUN";
-  payload: { runId: string };
+  payload: { requestId: string; runId: string };
 };
 
 export type ControlKillSwitchMessage = {
   type: "CONTROL_KILL_SWITCH";
-  payload: { enabled: boolean };
+  payload: { requestId: string; enabled: boolean };
+};
+
+export type ControlHelloMessage = {
+  type: "CONTROL_HELLO";
+  payload: {
+    requestId: string;
+    appVersion: string;
+    protocolVersion: string;
+  };
+};
+
+export type AgentHelloMessage = {
+  type: "AGENT_HELLO";
+  payload: {
+    requestId: string;
+    agentVersion: string;
+    protocolVersion: string;
+    tabUrl: string;
+    site: string;
+  };
+};
+
+export type ControlPingMessage = {
+  type: "CONTROL_PING";
+  payload: {
+    requestId: string;
+  };
+};
+
+export type ControlStepNextMessage = {
+  type: "CONTROL_STEP_NEXT";
+  payload: {
+    requestId: string;
+    runId: string;
+    rowIndex: number;
+    stepIndex: number;
+  };
+};
+
+export type AgentPongMessage = {
+  type: "AGENT_PONG";
+  payload: {
+    requestId: string;
+    tabUrl: string;
+    site: string;
+    uptimeMs: number;
+  };
+};
+
+export type AgentAckMessage = {
+  type: "AGENT_ACK";
+  payload: {
+    requestId: string;
+    commandType: string;
+    ok: boolean;
+    error: string;
+  };
 };
 
 export type AgentStatusMessage = {
@@ -68,11 +126,19 @@ export type AgentRowResultMessage = {
     artifacts: {
       screenshot?: string;
       htmlSnapshot?: string;
+      consoleLogs?: string[];
     };
+    durationMs?: number;
   };
 };
 
 export type ACPMessage =
+  | ControlHelloMessage
+  | AgentHelloMessage
+  | ControlPingMessage
+  | ControlStepNextMessage
+  | AgentPongMessage
+  | AgentAckMessage
   | ControlStartRunMessage
   | ControlPauseRunMessage
   | ControlResumeRunMessage
@@ -119,6 +185,8 @@ export type RunSettings = {
   delayMaxMs: number;
   concurrency: number;
   bestEffort: boolean;
+  dryRun: boolean;
+  stepThrough: boolean;
   storageState?: string;
 };
 

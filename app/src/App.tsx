@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ACPMessage,
   AgentLogMessage,
@@ -14,14 +14,23 @@ import {
   Job,
   Run,
   createDefaultSettings,
+  createDefaultWorkflow,
   createJob,
   createRun,
   createStep,
   createWorkflow,
-  loadState,
-  saveState,
 } from "./state";
 import { formatTimestamp } from "./utils";
+import { loadSettings, saveSettings } from "./storage/settings";
+import {
+  db,
+  exportAllData,
+  getLegacyBackup,
+  importAllData,
+  loadAllData,
+  migrateLegacyState,
+  type RunRecord,
+} from "./storage/db";
 
 const transport = new ACPTransport();
 
@@ -66,8 +75,40 @@ const prepareRowsForRun = (rows: Job["rows"]) => {
   return processed;
 };
 
+const toRunRecord = (run: Run): RunRecord => {
+  const { logs, rowResults, ...record } = run;
+  return record;
+};
+
+type AgentConnection = {
+  status: "unknown" | "connected" | "offline";
+  lastPingAt: string | null;
+  lastHelloAt: string | null;
+  tabUrl: string | null;
+  site: string | null;
+};
+
 const App: React.FC = () => {
-  const [state, setState] = useState<ACPState>(() => loadState());
+  const [state, setState] = useState<ACPState>(() => {
+    const settings = loadSettings();
+    return {
+      workflows: [],
+      jobs: [],
+      runs: [],
+      debugEnabled: settings.debugEnabled,
+      killSwitchEnabled: settings.killSwitchEnabled,
+    };
+  });
+  const [connection, setConnection] = useState<AgentConnection>({
+    status: "unknown",
+    lastPingAt: null,
+    lastHelloAt: null,
+    tabUrl: null,
+    site: null,
+  });
+  const [legacyBackup, setLegacyBackup] = useState<string | null>(getLegacyBackup());
+  const [dataLoaded, setDataLoaded] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<"dashboard" | "workflows" | "runs" | "settings">(
     "dashboard",
   );
@@ -79,18 +120,113 @@ const App: React.FC = () => {
   const runs = state.runs;
 
   useEffect(() => {
-    saveState(state);
-  }, [state]);
+    saveSettings({
+      debugEnabled: state.debugEnabled,
+      killSwitchEnabled: state.killSwitchEnabled,
+    });
+  }, [state.debugEnabled, state.killSwitchEnabled]);
 
   useEffect(() => {
-    transport.send({ type: "CONTROL_KILL_SWITCH", payload: { enabled: state.killSwitchEnabled } });
+    let active = true;
+    const hydrate = async () => {
+      await migrateLegacyState();
+      const data = await loadAllData();
+      if (!active) {
+        return;
+      }
+      const runsById = new Map<string, Run>();
+      data.runs.forEach((run) => {
+        runsById.set(run.id, {
+          ...run,
+          currentStepIndex: run.currentStepIndex ?? 0,
+          logs: [],
+          rowResults: [],
+        });
+      });
+      data.logs.forEach((log) => {
+        const run = runsById.get(log.runId);
+        if (run) {
+          run.logs.push(log);
+        }
+      });
+      data.rowResults.forEach((result) => {
+        const run = runsById.get(result.runId);
+        if (run) {
+          const { id: _id, ...rest } = result;
+          run.rowResults.push(rest);
+        }
+      });
+      const workflows =
+        data.workflows.length > 0 ? data.workflows : [createDefaultWorkflow()];
+      if (data.workflows.length === 0) {
+        await db.workflows.bulkPut(workflows);
+      }
+      setState((prev) => ({
+        ...prev,
+        workflows,
+        jobs: data.jobs,
+        runs: Array.from(runsById.values()),
+      }));
+      setLegacyBackup(getLegacyBackup());
+      setDataLoaded(true);
+    };
+    void hydrate();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    transport.send({
+      type: "CONTROL_KILL_SWITCH",
+      payload: {
+        requestId: transport.createRequestId(),
+        enabled: state.killSwitchEnabled,
+      },
+    });
   }, [state.killSwitchEnabled]);
 
   useEffect(() => {
     const unsubscribe = transport.subscribe((message) => {
-      setState((prev) => handleMessage(prev, message));
+      setState((prev) => handleMessage(prev, message, setConnection));
     });
     return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      transport.send({
+        type: "CONTROL_PING",
+        payload: { requestId: transport.createRequestId() },
+      });
+    }, 5000);
+    transport.send({
+      type: "CONTROL_HELLO",
+      payload: {
+        requestId: transport.createRequestId(),
+        appVersion: "1.0.0",
+        protocolVersion: "1.1.0",
+      },
+    });
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setConnection((prev) => {
+        if (!prev.lastPingAt) {
+          return prev;
+        }
+        const ageMs = Date.now() - new Date(prev.lastPingAt).getTime();
+        if (ageMs > 15000 && prev.status === "connected") {
+          return { ...prev, status: "offline" };
+        }
+        return prev;
+      });
+    }, 5000);
+    return () => window.clearInterval(interval);
   }, []);
 
   const selectedJob = useMemo(
@@ -108,10 +244,12 @@ const App: React.FC = () => {
     if (!name) {
       return;
     }
+    const workflow = createWorkflow(name);
     setState((prev) => ({
       ...prev,
-      workflows: [...prev.workflows, createWorkflow(name)],
+      workflows: [...prev.workflows, workflow],
     }));
+    void db.workflows.put(workflow);
     setActiveTab("workflows");
   };
 
@@ -120,6 +258,7 @@ const App: React.FC = () => {
       ...prev,
       workflows: prev.workflows.filter((workflow) => workflow.id !== workflowId),
     }));
+    void db.workflows.delete(workflowId);
   };
 
   const handleCreateJob = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -138,10 +277,12 @@ const App: React.FC = () => {
     }
     file.text().then((text) => {
       const { headers, rows } = parseCsv(text);
+      const job = createJob(name, workflowId, file.name, headers, rows);
       setState((prev) => ({
         ...prev,
-        jobs: [...prev.jobs, createJob(name, workflowId, file.name, headers, rows)],
+        jobs: [...prev.jobs, job],
       }));
+      void db.jobs.put(job);
       setActiveTab("dashboard");
     });
   };
@@ -169,9 +310,10 @@ const App: React.FC = () => {
       return;
     }
     const preparedRows = prepareRowsForRun(job.rows);
-    transport.send({
+    const startMessage = {
       type: "CONTROL_START_RUN",
       payload: {
+        requestId: transport.createRequestId(),
         runId: run.id,
         jobId: job.id,
         workflow,
@@ -179,61 +321,100 @@ const App: React.FC = () => {
         settings,
         resumeFrom: run.lastCompletedRow + 1,
       },
-    });
+    } as const;
+    transport
+      .sendCommand(startMessage)
+      .catch((error) => alert(`Agent did not acknowledge the run: ${error.message}`));
+    const runningRun = { ...run, status: "running", updatedAt: new Date().toISOString() };
     setState((prev) => ({
       ...prev,
       runs: [
         {
-          ...run,
-          status: "running",
-          updatedAt: new Date().toISOString(),
+          ...runningRun,
         },
         ...prev.runs,
       ],
     }));
+    void db.runs.put(toRunRecord(runningRun));
     setSelectedRunId(run.id);
     setActiveTab("runs");
   };
 
   const handlePauseRun = (run: Run) => {
-    transport.send({ type: "CONTROL_PAUSE_RUN", payload: { runId: run.id } });
+    transport
+      .sendCommand({
+        type: "CONTROL_PAUSE_RUN",
+        payload: { requestId: transport.createRequestId(), runId: run.id },
+      })
+      .catch((error) => alert(`Pause failed: ${error.message}`));
     setState((prev) => ({
       ...prev,
       runs: prev.runs.map((item) =>
         item.id === run.id ? { ...item, status: "paused", updatedAt: new Date().toISOString() } : item,
       ),
     }));
+    void db.runs.put(toRunRecord({ ...run, status: "paused", updatedAt: new Date().toISOString() }));
   };
 
   const handleResumeRun = (run: Run) => {
-    transport.send({ type: "CONTROL_RESUME_RUN", payload: { runId: run.id } });
+    transport
+      .sendCommand({
+        type: "CONTROL_RESUME_RUN",
+        payload: { requestId: transport.createRequestId(), runId: run.id },
+      })
+      .catch((error) => alert(`Resume failed: ${error.message}`));
     setState((prev) => ({
       ...prev,
       runs: prev.runs.map((item) =>
         item.id === run.id ? { ...item, status: "running", updatedAt: new Date().toISOString() } : item,
       ),
     }));
+    void db.runs.put(toRunRecord({ ...run, status: "running", updatedAt: new Date().toISOString() }));
   };
 
   const handleStopRun = (run: Run) => {
-    transport.send({ type: "CONTROL_STOP_RUN", payload: { runId: run.id } });
+    transport
+      .sendCommand({
+        type: "CONTROL_STOP_RUN",
+        payload: { requestId: transport.createRequestId(), runId: run.id },
+      })
+      .catch((error) => alert(`Stop failed: ${error.message}`));
     setState((prev) => ({
       ...prev,
       runs: prev.runs.map((item) =>
         item.id === run.id ? { ...item, status: "stopped", updatedAt: new Date().toISOString() } : item,
       ),
     }));
+    void db.runs.put(toRunRecord({ ...run, status: "stopped", updatedAt: new Date().toISOString() }));
+  };
+
+  const handleStepNext = (run: Run) => {
+    transport
+      .sendCommand({
+        type: "CONTROL_STEP_NEXT",
+        payload: {
+          requestId: transport.createRequestId(),
+          runId: run.id,
+          rowIndex: run.currentRowIndex,
+          stepIndex: run.currentStepIndex,
+        },
+      })
+      .catch((error) => alert(`Step signal failed: ${error.message}`));
   };
 
   const handleUpdateSettings = (run: Run, updates: Partial<Run["settings"]>) => {
+    const updated = {
+      ...run,
+      settings: { ...run.settings, ...updates },
+      updatedAt: new Date().toISOString(),
+    };
     setState((prev) => ({
       ...prev,
       runs: prev.runs.map((item) =>
-        item.id === run.id
-          ? { ...item, settings: { ...item.settings, ...updates }, updatedAt: new Date().toISOString() }
-          : item,
+        item.id === run.id ? updated : item,
       ),
     }));
+    void db.runs.put(toRunRecord(updated));
   };
 
   const handleDebugToggle = () => {
@@ -247,9 +428,151 @@ const App: React.FC = () => {
   const handleKillSwitchToggle = () => {
     setState((prev) => {
       const next = !prev.killSwitchEnabled;
-      transport.send({ type: "CONTROL_KILL_SWITCH", payload: { enabled: next } });
+      transport.send({
+        type: "CONTROL_KILL_SWITCH",
+        payload: { requestId: transport.createRequestId(), enabled: next },
+      });
       return { ...prev, killSwitchEnabled: next };
     });
+  };
+
+  const handleExportAllData = async () => {
+    const payload = await exportAllData();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `acp-export-${new Date().toISOString()}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
+  const handleImportAllData = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      await importAllData(payload);
+      const data = await loadAllData();
+      const runsById = new Map<string, Run>();
+      data.runs.forEach((run) => {
+        runsById.set(run.id, {
+          ...run,
+          currentStepIndex: run.currentStepIndex ?? 0,
+          logs: [],
+          rowResults: [],
+        });
+      });
+      data.logs.forEach((log) => {
+        const run = runsById.get(log.runId);
+        if (run) {
+          run.logs.push(log);
+        }
+      });
+      data.rowResults.forEach((result) => {
+        const run = runsById.get(result.runId);
+        if (run) {
+          const { id: _id, ...rest } = result;
+          run.rowResults.push(rest);
+        }
+      });
+      setState((prev) => ({
+        ...prev,
+        workflows: data.workflows,
+        jobs: data.jobs,
+        runs: Array.from(runsById.values()),
+      }));
+      alert("Import complete.");
+    } catch (error) {
+      alert(`Import failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const handleReHandshake = () => {
+    transport.send({
+      type: "CONTROL_HELLO",
+      payload: {
+        requestId: transport.createRequestId(),
+        appVersion: "1.0.0",
+        protocolVersion: "1.1.0",
+      },
+    });
+  };
+
+  const handleCopyDebugBundle = async () => {
+    const payload = await exportAllData();
+    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    alert("Debug bundle copied to clipboard.");
+  };
+
+  const handleOpenDiagnostics = async () => {
+    const payload = await exportAllData();
+    const diagnostics = {
+      exportedAt: new Date().toISOString(),
+      connection,
+      data: payload,
+    };
+    const blob = new Blob([JSON.stringify(diagnostics, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank", "noopener,noreferrer");
+    window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+
+  const handleDownloadLegacyBackup = () => {
+    if (!legacyBackup) {
+      return;
+    }
+    const blob = new Blob([legacyBackup], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "acp-legacy-backup.json";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
+  const handleExportRunReport = (run: Run) => {
+    const job = jobs.find((item) => item.id === run.jobId);
+    if (!job) {
+      alert("Job data not found for this run.");
+      return;
+    }
+    const resultsByRow = new Map(run.rowResults.map((result) => [result.rowIndex, result]));
+    const reportRows = job.rows.map((row, index) => {
+      const result = resultsByRow.get(index);
+      return {
+        rowIndex: String(index),
+        status: result?.status ?? "pending",
+        error: result?.error ?? "",
+        durationMs: result?.durationMs ? String(result.durationMs) : "",
+        ...row,
+      };
+    });
+    const headers = ["rowIndex", "status", "error", "durationMs", ...job.headers];
+    const csv = serializeCsv(headers, reportRows);
+    const jsonPayload = {
+      run,
+      job,
+      rows: reportRows,
+      logs: run.logs,
+    };
+    const csvBlob = new Blob([csv], { type: "text/csv" });
+    const csvLink = document.createElement("a");
+    csvLink.href = URL.createObjectURL(csvBlob);
+    csvLink.download = `run-${run.id}-report.csv`;
+    csvLink.click();
+    URL.revokeObjectURL(csvLink.href);
+    const jsonBlob = new Blob([JSON.stringify(jsonPayload, null, 2)], {
+      type: "application/json",
+    });
+    const jsonLink = document.createElement("a");
+    jsonLink.href = URL.createObjectURL(jsonBlob);
+    jsonLink.download = `run-${run.id}-report.json`;
+    jsonLink.click();
+    URL.revokeObjectURL(jsonLink.href);
   };
 
   return (
@@ -308,6 +631,11 @@ const App: React.FC = () => {
             automation policies. Use rate limits, avoid aggressive automation, and monitor runs.
           </p>
         </section>
+        {!dataLoaded && (
+          <section className="panel">
+            <p className="muted">Loading data from IndexedDB…</p>
+          </section>
+        )}
         {activeTab === "dashboard" && (
           <section className="panel">
             <h2>Jobs</h2>
@@ -356,12 +684,13 @@ const App: React.FC = () => {
                   key={workflow.id}
                   workflow={workflow}
                   onDelete={() => handleDeleteWorkflow(workflow.id)}
-                  onUpdate={(updated) =>
+                  onUpdate={(updated) => {
                     setState((prev) => ({
                       ...prev,
                       workflows: prev.workflows.map((flow) => (flow.id === workflow.id ? updated : flow)),
-                    }))
-                  }
+                    }));
+                    void db.workflows.put(updated);
+                  }}
                 />
               ))
             )}
@@ -398,6 +727,8 @@ const App: React.FC = () => {
                     onPause={handlePauseRun}
                     onResume={handleResumeRun}
                     onStop={handleStopRun}
+                    onStepNext={handleStepNext}
+                    onExportReport={handleExportRunReport}
                     onUpdateSettings={handleUpdateSettings}
                   />
                 )}
@@ -409,6 +740,31 @@ const App: React.FC = () => {
         {activeTab === "settings" && (
           <section className="panel">
             <h2>Settings</h2>
+            <div className="card">
+              <h3>Connection</h3>
+              <p>
+                Status: <strong>{connection.status}</strong>
+              </p>
+              <p className="muted">
+                Last hello: {connection.lastHelloAt ? formatTimestamp(connection.lastHelloAt) : "—"}
+              </p>
+              <p className="muted">
+                Last ping: {connection.lastPingAt ? formatTimestamp(connection.lastPingAt) : "—"}
+              </p>
+              <p className="muted">Tab URL: {connection.tabUrl ?? "—"}</p>
+              <p className="muted">Site: {connection.site ?? "—"}</p>
+              <div className="card__actions">
+                <button type="button" className="button secondary" onClick={handleReHandshake}>
+                  Re-handshake
+                </button>
+                <button type="button" className="button secondary" onClick={handleOpenDiagnostics}>
+                  Open diagnostics
+                </button>
+                <button type="button" className="button secondary" onClick={handleCopyDebugBundle}>
+                  Copy debug bundle
+                </button>
+              </div>
+            </div>
             <div className="card">
               <label className="toggle">
                 <input type="checkbox" checked={state.debugEnabled} onChange={handleDebugToggle} />
@@ -430,6 +786,39 @@ const App: React.FC = () => {
                 you disable it.
               </p>
             </div>
+            <div className="card">
+              <h3>Data management</h3>
+              <div className="card__actions">
+                <button type="button" className="button secondary" onClick={handleExportAllData}>
+                  Export All Data
+                </button>
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  Import Data
+                </button>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept="application/json"
+                  onChange={handleImportAllData}
+                  hidden
+                />
+              </div>
+              {legacyBackup && (
+                <div className="card__actions">
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={handleDownloadLegacyBackup}
+                  >
+                    Download legacy backup
+                  </button>
+                </div>
+              )}
+            </div>
           </section>
         )}
       </main>
@@ -437,79 +826,138 @@ const App: React.FC = () => {
   );
 };
 
-const handleMessage = (state: ACPState, message: ACPMessage): ACPState => {
+const handleMessage = (
+  state: ACPState,
+  message: ACPMessage,
+  setConnection: React.Dispatch<React.SetStateAction<AgentConnection>>,
+): ACPState => {
   switch (message.type) {
-    case "AGENT_STATUS":
-      return updateRunStatus(state, message);
-    case "AGENT_LOG":
-      return appendRunLog(state, message);
-    case "AGENT_ROW_RESULT":
-      return appendRowResult(state, message);
+    case "AGENT_HELLO":
+      setConnection(() => ({
+        status: "connected",
+        lastHelloAt: new Date().toISOString(),
+        lastPingAt: null,
+        tabUrl: message.payload.tabUrl,
+        site: message.payload.site,
+      }));
+      return state;
+    case "AGENT_PONG":
+      setConnection((prev) => ({
+        ...prev,
+        status: "connected",
+        lastPingAt: new Date().toISOString(),
+        tabUrl: message.payload.tabUrl,
+        site: message.payload.site,
+      }));
+      return state;
+    case "AGENT_STATUS": {
+      const { nextState, updatedRun } = updateRunStatus(state, message);
+      if (updatedRun) {
+        void db.runs.put(toRunRecord(updatedRun));
+      }
+      return nextState;
+    }
+    case "AGENT_LOG": {
+      const { nextState, logEntry, updatedRun } = appendRunLog(state, message);
+      if (logEntry) {
+        void db.logs.put(logEntry);
+      }
+      if (updatedRun) {
+        void db.runs.put(toRunRecord(updatedRun));
+      }
+      return nextState;
+    }
+    case "AGENT_ROW_RESULT": {
+      const { nextState, rowResult, updatedRun } = appendRowResult(state, message);
+      if (rowResult) {
+        void db.rowResults.put({ ...rowResult, id: `${rowResult.runId}:${rowResult.rowIndex}` });
+      }
+      if (updatedRun) {
+        void db.runs.put(toRunRecord(updatedRun));
+      }
+      return nextState;
+    }
     default:
       return state;
   }
 };
 
-const updateRunStatus = (state: ACPState, message: AgentStatusMessage) => ({
-  ...state,
-  runs: state.runs.map((run) =>
-    run.id === message.payload.runId
-      ? {
-          ...run,
-          status: message.payload.status,
-          currentRowIndex: message.payload.currentRowIndex,
-          successCount: message.payload.successCount,
-          failureCount: message.payload.failureCount,
-          updatedAt: new Date().toISOString(),
-        }
-      : run,
-  ),
-});
+const updateRunStatus = (state: ACPState, message: AgentStatusMessage) => {
+  let updatedRun: Run | null = null;
+  const runs = state.runs.map((run) => {
+    if (run.id !== message.payload.runId) {
+      return run;
+    }
+    const rowChanged = run.currentRowIndex !== message.payload.currentRowIndex;
+    const next = {
+      ...run,
+      status: message.payload.status,
+      currentRowIndex: message.payload.currentRowIndex,
+      currentStepIndex: rowChanged ? 0 : run.currentStepIndex,
+      successCount: message.payload.successCount,
+      failureCount: message.payload.failureCount,
+      updatedAt: new Date().toISOString(),
+    };
+    updatedRun = next;
+    return next;
+  });
+  return { nextState: { ...state, runs }, updatedRun };
+};
 
-const appendRunLog = (state: ACPState, message: AgentLogMessage) => ({
-  ...state,
-  runs: state.runs.map((run) =>
-    run.id === message.payload.runId
-      ? {
-          ...run,
-          logs: [
-            {
-              id: `${message.payload.rowIndex}-${message.payload.stepIndex}-${message.payload.timestamp}`,
-              rowIndex: message.payload.rowIndex,
-              stepIndex: message.payload.stepIndex,
-              level: message.payload.level,
-              message: message.payload.message,
-              timestamp: message.payload.timestamp,
-            },
-            ...run.logs,
-          ],
-          updatedAt: new Date().toISOString(),
-        }
-      : run,
-  ),
-});
+const appendRunLog = (state: ACPState, message: AgentLogMessage) => {
+  let logEntry: Run["logs"][number] | null = null;
+  let updatedRun: Run | null = null;
+  const runs = state.runs.map((run) => {
+    if (run.id !== message.payload.runId) {
+      return run;
+    }
+    logEntry = {
+      id: `${message.payload.runId}-${message.payload.rowIndex}-${message.payload.stepIndex}-${message.payload.timestamp}`,
+      runId: message.payload.runId,
+      rowIndex: message.payload.rowIndex,
+      stepIndex: message.payload.stepIndex,
+      level: message.payload.level,
+      message: message.payload.message,
+      timestamp: message.payload.timestamp,
+    };
+    const next = {
+      ...run,
+      logs: logEntry ? [logEntry, ...run.logs] : run.logs,
+      currentStepIndex: message.payload.stepIndex + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    updatedRun = next;
+    return next;
+  });
+  return { nextState: { ...state, runs }, logEntry, updatedRun };
+};
 
-const appendRowResult = (state: ACPState, message: AgentRowResultMessage) => ({
-  ...state,
-  runs: state.runs.map((run) =>
-    run.id === message.payload.runId
-      ? {
-          ...run,
-          rowResults: [
-            {
-              rowIndex: message.payload.rowIndex,
-              status: message.payload.status,
-              error: message.payload.error,
-              artifacts: message.payload.artifacts,
-            },
-            ...run.rowResults,
-          ],
-          lastCompletedRow: Math.max(run.lastCompletedRow, message.payload.rowIndex),
-          updatedAt: new Date().toISOString(),
-        }
-      : run,
-  ),
-});
+const appendRowResult = (state: ACPState, message: AgentRowResultMessage) => {
+  let rowResult: Run["rowResults"][number] | null = null;
+  let updatedRun: Run | null = null;
+  const runs = state.runs.map((run) => {
+    if (run.id !== message.payload.runId) {
+      return run;
+    }
+    rowResult = {
+      runId: message.payload.runId,
+      rowIndex: message.payload.rowIndex,
+      status: message.payload.status,
+      error: message.payload.error,
+      artifacts: message.payload.artifacts,
+      durationMs: message.payload.durationMs,
+    };
+    const next = {
+      ...run,
+      rowResults: rowResult ? [rowResult, ...run.rowResults] : run.rowResults,
+      lastCompletedRow: Math.max(run.lastCompletedRow, message.payload.rowIndex),
+      updatedAt: new Date().toISOString(),
+    };
+    updatedRun = next;
+    return next;
+  });
+  return { nextState: { ...state, runs }, rowResult, updatedRun };
+};
 
 const WorkflowEditor: React.FC<{
   workflow: ACPState["workflows"][number];
@@ -685,8 +1133,10 @@ const RunDetail: React.FC<{
   onPause: (run: Run) => void;
   onResume: (run: Run) => void;
   onStop: (run: Run) => void;
+  onStepNext: (run: Run) => void;
+  onExportReport: (run: Run) => void;
   onUpdateSettings: (run: Run, updates: Partial<Run["settings"]>) => void;
-}> = ({ run, job, onPause, onResume, onStop, onUpdateSettings }) => (
+}> = ({ run, job, onPause, onResume, onStop, onStepNext, onExportReport, onUpdateSettings }) => (
   <div className="card run-detail">
     <header>
       <h3>Run {run.id.slice(0, 8)}</h3>
@@ -704,6 +1154,10 @@ const RunDetail: React.FC<{
         <span>
           {run.currentRowIndex + 1} / {job?.rows.length ?? 0}
         </span>
+      </div>
+      <div>
+        <strong>Step</strong>
+        <span>{run.currentStepIndex + 1}</span>
       </div>
       <div>
         <strong>Success</strong>
@@ -726,6 +1180,14 @@ const RunDetail: React.FC<{
       )}
       <button type="button" className="button secondary" onClick={() => onStop(run)}>
         Stop
+      </button>
+      {run.settings.stepThrough && (
+        <button type="button" className="button" onClick={() => onStepNext(run)}>
+          Next Step
+        </button>
+      )}
+      <button type="button" className="button secondary" onClick={() => onExportReport(run)}>
+        Export Run Report
       </button>
     </div>
     <div className="settings-grid">
@@ -785,6 +1247,26 @@ const RunDetail: React.FC<{
           <option value="true">true</option>
         </select>
       </label>
+      <label>
+        Dry Run
+        <select
+          value={String(run.settings.dryRun)}
+          onChange={(event) => onUpdateSettings(run, { dryRun: event.target.value === "true" })}
+        >
+          <option value="false">false</option>
+          <option value="true">true</option>
+        </select>
+      </label>
+      <label>
+        Step Through
+        <select
+          value={String(run.settings.stepThrough)}
+          onChange={(event) => onUpdateSettings(run, { stepThrough: event.target.value === "true" })}
+        >
+          <option value="false">false</option>
+          <option value="true">true</option>
+        </select>
+      </label>
     </div>
     <div className="logs">
       <h4>Step Logs</h4>
@@ -810,12 +1292,26 @@ const RunDetail: React.FC<{
             <strong>
               Row {result.rowIndex + 1}: {result.status}
             </strong>
+            {result.durationMs !== undefined && (
+              <p className="muted">Duration: {result.durationMs} ms</p>
+            )}
             {result.error && <p className="error">{result.error}</p>}
             {result.artifacts?.screenshot && (
               <a href={result.artifacts.screenshot} target="_blank" rel="noreferrer">
                 Screenshot
               </a>
             )}
+            {result.artifacts?.htmlSnapshot && (
+              <a href={result.artifacts.htmlSnapshot} target="_blank" rel="noreferrer">
+                DOM Snapshot
+              </a>
+            )}
+            {result.artifacts?.consoleLogs?.length ? (
+              <details>
+                <summary>Console Logs</summary>
+                <pre className="pre">{result.artifacts.consoleLogs.join("\n")}</pre>
+              </details>
+            ) : null}
           </div>
         ))
       )}

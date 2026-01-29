@@ -266,6 +266,15 @@ textarea {
   border-radius: 0.6rem;
 }
 
+.pre {
+  background: #0f131c;
+  border-radius: 0.6rem;
+  padding: 0.6rem;
+  white-space: pre-wrap;
+  color: #cfd6e6;
+  margin-top: 0.5rem;
+}
+
 .toggle {
   display: flex;
   align-items: center;
